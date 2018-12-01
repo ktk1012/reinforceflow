@@ -166,3 +166,90 @@ class ProportionalReplay(ExperienceReplay):
         for idx, prior in zip(indexes, priorities):
             self._max_priority = max(self._max_priority, prior)
             self.sumtree.update(int(idx), prior)
+
+
+class BackPropagationReplay(ExperienceReplay):
+    def __init__(self, capacity, batch_size,
+                 accum_initial, accum_func,
+                 min_size=0, accum_bias=1, beta=10, lambd=3):
+        super(BackPropagationReplay, self).__init__(capacity, batch_size, min_size)
+        self._beta = beta
+        self.sumtree = SumTree(capacity)
+        self._lambd=lambd
+        self._timestamp_counter = 0
+        self._timestamp = [-1, ] * capacity
+        self._origins = [-1, ] * capacity
+        self._factor = [1, ] * capacity
+        self._priority = [1, ] * capacity
+        self._accum_initial = accum_initial
+        self._accum_bias = accum_bias
+        self._accum = accum_initial
+        self._accum_func = accum_func
+
+    # This algorithm requires only clipped reward
+    def _preproc_priority(self, reward):
+        return self._accum_func(self._accum, reward) + self._accum_bias
+
+    def add(self, obs, action, reward, term, obs_next):
+        super(BackPropagationReplay, self).add(obs, action, reward, term, obs_next)
+        curr_idx = self._idx
+        prev_factor = self._cycle_idx(curr_idx)
+        self._factor[curr_idx] = self._beta if reward != 0 else 1.
+        self._priority[curr_idx] = self._preproc_priority(reward)
+        self._timestamp[curr_idx] = self._timestamp_counter
+        self.sumtree.append(self._priority[curr_idx] * self._factor[curr_idx])
+
+        if reward != 0 or term:
+            self._origins[curr_idx] = curr_idx
+
+        if term:
+            self._accum = self._accum_initial
+
+        # If history is removed, update predecessor chains
+        if curr_idx == 0 and prev_factor > 1:
+            next_idx = self._cycle_idx(curr_idx + 1)
+            self._factor[next_idx] = prev_factor
+            self.sumtree.update(next_idx, self._factor[next_idx] * self._priority[next_idx])
+
+        self._timestamp_counter += 1
+
+    def sample(self):
+        idxs = []
+        proportion = self.sumtree.sum() / self._batch_size
+        for i in range(self._batch_size):
+            sum_from = proportion * i
+            sum_to = proportion * (i + 1)
+            s = random.uniform(sum_from, sum_to)
+            idxs.append(self.sumtree.find_sum_idx(s))
+        gather = itemgetter(*idxs)
+        next_obs_gather = itemgetter(*[i + 1 for i in idxs])
+        # After sampling propagate its value
+        for idx in idxs:
+            predecessor = self._cycle_idx(idx - 1)
+            if predecessor != -1 and self._timestamp[predecessor] < self._timestamp[idx]:
+                if (not self._terms[predecessor]
+                        and self._rewards[predecessor] == 0
+                        and self._factor[idx] > 1):
+                    self._factor[predecessor] = self._factor[idx]
+                    self._origins[predecessor] = self._origins[idx]
+                    self.sumtree.update(predecessor, self._factor[predecessor] * self._priority[predecessor])
+
+                elif self._factor[idx] > 1:
+                    origin = self._origins[idx]
+                    factor_origin = self._factor[idx]
+                    self._factor[origin] = max(1, factor_origin // self._lambd)
+                    self.sumtree.update(origin, self._factor[origin] * self._priority[origin])
+
+                self._factor[idx] = 1
+                self.sumtree.update(idx, self._factor[idx] * self._priority[idx])
+
+        return (gather(self._obs),
+                gather(self._actions),
+                gather(self._rewards),
+                gather(self._terms),
+                next_obs_gather(self._obs),
+                np.ones_like(idxs, 'bool'),
+                idxs,
+                [1.0] * len(idxs))
+
+

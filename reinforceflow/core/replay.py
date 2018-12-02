@@ -256,3 +256,111 @@ class BackPropagationReplay(ExperienceReplay):
                 [1.0] * len(idxs))
 
 
+class WindoedBackPropagationReplay(ExperienceReplay):
+    def __init__(self, capacity, batch_size, window_size,
+                 min_size=0, beta=10, lambd=3):
+        super(WindoedBackPropagationReplay, self).__init__(capacity, batch_size, min_size)
+        self._beta = beta
+        self.sumtree = SumTree(capacity)
+        self._lambd=lambd
+        self._timestamp_counter = 0
+        self._timestamp = [-1, ] * capacity
+        self._origins = [-1, ] * capacity
+        self._factor = [1, ] * capacity
+        self._counter = [1, ] * capacity
+        self._window_size = window_size
+
+    # This algorithm requires only clipped reward
+    def _preproc_priority(self, counter):
+        if counter == 0:
+            return 1
+        return 2 - 1 / 2 ** (counter - 1)
+
+    def add(self, obs, action, reward, term, obs_next):
+        # If reward is not zero update previous experiences counter
+        idx = self._idx
+        prev_factor = self._factor[idx]
+        prev_counter = self._counter[idx]
+        prev_origin = self._origins[idx]
+        for i in reversed(range(1, self._window_size + 1)):
+            descent_experience = self._cycle_idx(self._idx - i)
+            if self._timestamp[descent_experience] <= self._timestamp_counter:
+                self._counter[descent_experience] += 1
+                self.sumtree.update(
+                    descent_experience,
+                    self._factor[descent_experience] * self._preproc_priority(self._counter[descent_experience]))
+
+        super(WindoedBackPropagationReplay, self).add(obs, action, reward, term, obs_next)
+        self._factor[idx] = self._beta if reward != 0 else 1.
+        self._counter[idx] = 1 if reward != 0 else 0
+        self._timestamp[idx] = self._timestamp_counter
+        self.sumtree.append(self._counter[idx] * self._preproc_priority(self._factor[idx]))
+
+        if reward != 0 or term:
+            self._origins[idx] = idx
+
+        # If history is removed, update predecessor chains
+        next_idx = self._idx
+        if self._timestamp[next_idx] != -1 and prev_origin != idx:
+            need_update = False
+            if prev_factor > 1:
+                self._factor[next_idx] = prev_factor
+                need_update = True
+            if prev_counter > 1:
+                self._counter[next_idx] = prev_counter
+                need_update = True
+
+            if need_update:
+                self.sumtree.update(
+                    next_idx,
+                    self._factor[next_idx] * self._preproc_priority(self._counter[next_idx]))
+
+        self._timestamp_counter += 1
+
+    def sample(self):
+        idxs = []
+        proportion = self.sumtree.sum() / self._batch_size
+        for i in range(self._batch_size):
+            sum_from = proportion * i
+            sum_to = proportion * (i + 1)
+            s = random.uniform(sum_from, sum_to)
+            idxs.append(self.sumtree.find_sum_idx(s))
+        gather = itemgetter(*idxs)
+        next_obs_gather = itemgetter(*[i + 1 for i in idxs])
+        # After sampling propagate its value
+        for idx in idxs:
+            predecessor = self._cycle_idx(idx - 1)
+            if predecessor != -1 and self._timestamp[predecessor] < self._timestamp[idx]:
+                if (not self._terms[predecessor]
+                        and self._rewards[predecessor] == 0
+                        and self._factor[idx] > 1):
+                    self._factor[predecessor] = self._factor[idx]
+                    self._counter[predecessor] = self._counter[idx]
+                    self._origins[predecessor] = self._origins[idx]
+                    self.sumtree.update(
+                        predecessor,
+                        self._factor[predecessor] * self._preproc_priority(self._counter[predecessor]))
+
+                elif self._factor[idx] > 1:
+                    origin = self._origins[idx]
+                    factor_origin = self._factor[idx]
+                    counter_origin = self._counter[idx]
+                    self._counter[origin] = counter_origin
+                    self._factor[origin] = max(1, factor_origin // self._lambd)
+                    self.sumtree.update(
+                        origin,
+                        self._factor[origin] * self._preproc_priority(self._counter[origin]))
+
+                self._factor[idx] = 1
+                self._counter[idx] = 1
+                self.sumtree.update(idx, self._factor[idx] * self._counter[idx])
+
+        return (gather(self._obs),
+                gather(self._actions),
+                gather(self._rewards),
+                gather(self._terms),
+                next_obs_gather(self._obs),
+                np.ones_like(idxs, 'bool'),
+                idxs,
+                [1.0] * len(idxs))
+

@@ -188,7 +188,9 @@ class BackPropagationReplay(ExperienceReplay):
 
     # This algorithm requires only clipped reward
     def _preproc_priority(self, reward):
-        return self._accum_func(self._accum, reward) + self._accum_bias
+        new_val = self._accum_func(self._accum, reward)
+        self._accum = new_val
+        return new_val + self._accum_bias
 
     def add(self, obs, action, reward, term, obs_next):
         idx = self._idx

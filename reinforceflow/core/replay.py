@@ -256,10 +256,10 @@ class BackPropagationReplay(ExperienceReplay):
                 [1.0] * len(idxs))
 
 
-class WindoedBackPropagationReplay(ExperienceReplay):
+class WindowedBackPropagationReplay(ExperienceReplay):
     def __init__(self, capacity, batch_size, window_size,
                  min_size=0, beta=10, lambd=3):
-        super(WindoedBackPropagationReplay, self).__init__(capacity, batch_size, min_size)
+        super(WindowedBackPropagationReplay, self).__init__(capacity, batch_size, min_size)
         self._beta = beta
         self.sumtree = SumTree(capacity)
         self._lambd=lambd
@@ -282,15 +282,17 @@ class WindoedBackPropagationReplay(ExperienceReplay):
         prev_factor = self._factor[idx]
         prev_counter = self._counter[idx]
         prev_origin = self._origins[idx]
-        for i in reversed(range(1, self._window_size + 1)):
-            descent_experience = self._cycle_idx(self._idx - i)
-            if self._timestamp[descent_experience] <= self._timestamp_counter:
-                self._counter[descent_experience] += 1
+        for i in range(1, self._window_size + 1):
+            prev_idx = self._cycle_idx(self._idx -1)
+            if self._terms[prev_idx]:
+                break
+            if self._counter[prev_idx] > 0:
+                self._counter[prev_idx] += 1
                 self.sumtree.update(
-                    descent_experience,
-                    self._factor[descent_experience] * self._preproc_priority(self._counter[descent_experience]))
+                    prev_idx,
+                    self._factor[prev_idx] * self._preproc_priority(self._counter[prev_idx]))
 
-        super(WindoedBackPropagationReplay, self).add(obs, action, reward, term, obs_next)
+        super(WindowedBackPropagationReplay, self).add(obs, action, reward, term, obs_next)
         self._factor[idx] = self._beta if reward != 0 else 1.
         self._counter[idx] = 1 if reward != 0 else 0
         self._timestamp[idx] = self._timestamp_counter

@@ -193,6 +193,7 @@ class BackPropagationReplay(ExperienceReplay):
     def add(self, obs, action, reward, term, obs_next):
         idx = self._idx
         prev_factor = self._factor[idx]
+        prev_origin = self._origins[idx]
         super(BackPropagationReplay, self).add(obs, action, reward, term, obs_next)
         self._factor[idx] = self._beta if reward != 0 else 1.
         self._priority[idx] = self._preproc_priority(reward)
@@ -206,8 +207,8 @@ class BackPropagationReplay(ExperienceReplay):
             self._accum = self._accum_initial
 
         # If history is removed, update predecessor chains
-        if idx == 0 and prev_factor > 1:
-            next_idx = self._cycle_idx(idx + 1)
+        next_idx = self._idx
+        if self._timestamp[next_idx] != -1 and idx != prev_origin and prev_factor > 1:
             self._factor[next_idx] = prev_factor
             self.sumtree.update(next_idx, self._factor[next_idx] * self._priority[next_idx])
 

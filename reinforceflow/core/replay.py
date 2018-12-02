@@ -171,7 +171,7 @@ class ProportionalReplay(ExperienceReplay):
 class BackPropagationReplay(ExperienceReplay):
     def __init__(self, capacity, batch_size,
                  accum_initial, accum_func,
-                 min_size=0, accum_bias=1, beta=10, lambd=3):
+                 min_size=0, accum_bias=0, beta=10, lambd=3):
         super(BackPropagationReplay, self).__init__(capacity, batch_size, min_size)
         self._beta = beta
         self.sumtree = SumTree(capacity)
@@ -191,23 +191,23 @@ class BackPropagationReplay(ExperienceReplay):
         return self._accum_func(self._accum, reward) + self._accum_bias
 
     def add(self, obs, action, reward, term, obs_next):
+        idx = self._idx
+        prev_factor = self._factor[idx]
         super(BackPropagationReplay, self).add(obs, action, reward, term, obs_next)
-        curr_idx = self._idx
-        prev_factor = self._cycle_idx(curr_idx)
-        self._factor[curr_idx] = self._beta if reward != 0 else 1.
-        self._priority[curr_idx] = self._preproc_priority(reward)
-        self._timestamp[curr_idx] = self._timestamp_counter
-        self.sumtree.append(self._priority[curr_idx] * self._factor[curr_idx])
+        self._factor[idx] = self._beta if reward != 0 else 1.
+        self._priority[idx] = self._preproc_priority(reward)
+        self._timestamp[idx] = self._timestamp_counter
+        self.sumtree.append(self._priority[idx] * self._factor[idx])
 
         if reward != 0 or term:
-            self._origins[curr_idx] = curr_idx
+            self._origins[idx] = idx
 
         if term:
             self._accum = self._accum_initial
 
         # If history is removed, update predecessor chains
-        if curr_idx == 0 and prev_factor > 1:
-            next_idx = self._cycle_idx(curr_idx + 1)
+        if idx == 0 and prev_factor > 1:
+            next_idx = self._cycle_idx(idx + 1)
             self._factor[next_idx] = prev_factor
             self.sumtree.update(next_idx, self._factor[next_idx] * self._priority[next_idx])
 
@@ -226,7 +226,9 @@ class BackPropagationReplay(ExperienceReplay):
         # After sampling propagate its value
         for idx in idxs:
             predecessor = self._cycle_idx(idx - 1)
-            if predecessor != -1 and self._timestamp[predecessor] < self._timestamp[idx]:
+            if self._timestamp[predecessor] != -1 \
+                    and self._timestamp[predecessor] < self._timestamp[idx]:
+
                 if (not self._terms[predecessor]
                         and self._rewards[predecessor] == 0
                         and self._factor[idx] > 1):
